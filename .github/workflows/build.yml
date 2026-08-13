@@ -14,99 +14,308 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
+      # 1. Checkout
       - name: Checkout source
         uses: actions/checkout@v4
 
+      # 2. JDK 17
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
+      # 3. Find original TEST MITRA ZIP
       - name: Find TEST MITRA ZIP
         id: zip
         shell: bash
         run: |
-          ZIP=$(find . -type f -iname '*test*mitra*.zip' | head -n 1)
+          set -e
+
+          ZIP=$(find . -type f \( \
+            -iname 'test-mitra.zip' -o \
+            -iname '*test*mitra*.zip' \
+          \) | head -n 1)
+
           if [ -z "$ZIP" ]; then
-            echo "TEST MITRA ZIP not found"
+            echo "ERROR: TEST MITRA ZIP not found."
+            find . -maxdepth 3 -type f | sort
             exit 1
           fi
-          echo "ZIP=$ZIP"
+
+          echo "Found ZIP:"
+          echo "$ZIP"
+
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
 
+      # 4. Extract original ZIP
       - name: Extract TEST MITRA project
         shell: bash
         run: |
+          set -e
+
           rm -rf extracted
-          mkdir extracted
+          mkdir -p extracted
+
           unzip -q "${{ steps.zip.outputs.zip }}" -d extracted
 
+          echo "Extraction completed."
+
+      # 5. Locate Android project
       - name: Locate Android project
         id: project
         shell: bash
         run: |
-          PROJECT=$(find extracted -type f \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) -printf '%h\n' | head -n 1)
+          set -e
+
+          PROJECT=""
+
+          PROJECT=$(find extracted -type f \
+            \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) \
+            -printf '%h\n' | head -n 1)
 
           if [ -z "$PROJECT" ]; then
-            PROJECT=$(find extracted -type f \( -path '*/app/build.gradle' -o -path '*/app/build.gradle.kts' \) -printf '%h\n' | sed 's#/app$##' | head -n 1)
+            PROJECT=$(find extracted -type f \
+              \( -path '*/app/build.gradle' -o -path '*/app/build.gradle.kts' \) \
+              -printf '%h\n' | sed 's#/app$##' | head -n 1)
           fi
 
           if [ -z "$PROJECT" ]; then
-            echo "Android project not found"
+            echo "ERROR: Android project not found."
+
+            echo "Extracted files:"
+            find extracted -maxdepth 6 -type f | sort
+
             exit 1
           fi
 
-          echo "PROJECT=$PROJECT"
+          PROJECT=$(realpath "$PROJECT")
+
+          echo "Android project:"
+          echo "$PROJECT"
+
           echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
 
+      # 6. Verify Android project
+      - name: Verify Android project
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT="${{ steps.project.outputs.project }}"
+
+          echo "Checking:"
+          echo "$PROJECT"
+
+          if [ -f "$PROJECT/settings.gradle.kts" ]; then
+            echo "settings.gradle.kts found."
+          elif [ -f "$PROJECT/settings.gradle" ]; then
+            echo "settings.gradle found."
+          else
+            echo "ERROR: settings.gradle not found."
+            exit 1
+          fi
+
+          if [ -f "$PROJECT/app/build.gradle.kts" ]; then
+            echo "app/build.gradle.kts found."
+          elif [ -f "$PROJECT/app/build.gradle" ]; then
+            echo "app/build.gradle found."
+          else
+            echo "ERROR: app build file not found."
+            exit 1
+          fi
+
+          echo "Android project verification successful."
+
+      # 7. Create google-services.json only when secret exists
       - name: Create google-services.json
         shell: bash
         run: |
+          set -e
+
+          PROJECT="${{ steps.project.outputs.project }}"
+
           if [ -n "${{ secrets.GOOGLE_SERVICES_JSON }}" ]; then
-            printf '%s' '${{ secrets.GOOGLE_SERVICES_JSON }}' > "${{ steps.project.outputs.project }}/app/google-services.json"
+            printf '%s' '${{ secrets.GOOGLE_SERVICES_JSON }}' \
+              > "$PROJECT/app/google-services.json"
+
+            echo "google-services.json created."
+          else
+            echo "GOOGLE_SERVICES_JSON secret not supplied."
+            echo "Using existing google-services.json if present."
           fi
 
+      # 8. Remove duplicate google-services.json files
+      - name: Fix duplicate google-services files
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT="${{ steps.project.outputs.project }}"
+
+          APP_FILE="$PROJECT/app/google-services.json"
+
+          FILES=$(find "$PROJECT" -type f \
+            -name 'google-services.json' \
+            -print)
+
+          echo "google-services files:"
+          echo "$FILES"
+
+          COUNT=$(printf '%s\n' "$FILES" | sed '/^$/d' | wc -l)
+
+          if [ "$COUNT" -gt 1 ] && [ -f "$APP_FILE" ]; then
+
+            while IFS= read -r FILE; do
+
+              [ -z "$FILE" ] && continue
+              [ "$FILE" = "$APP_FILE" ] && continue
+
+              rm -f "$FILE"
+
+            done <<< "$FILES"
+
+          fi
+
+          echo "Duplicate google-services check completed."
+
+      # 9. Configure AndroidX and Kotlin sourceSets compatibility
       - name: Configure AndroidX
         shell: bash
         run: |
+          set -e
+
           PROJECT="${{ steps.project.outputs.project }}"
-          touch "$PROJECT/gradle.properties"
 
-          grep -q '^android.useAndroidX=' "$PROJECT/gradle.properties" \
-            && sed -i 's/^android.useAndroidX=.*/android.useAndroidX=true/' "$PROJECT/gradle.properties" \
-            || echo 'android.useAndroidX=true' >> "$PROJECT/gradle.properties"
+          PROPERTIES="$PROJECT/gradle.properties"
 
-          grep -q '^android.enableJetifier=' "$PROJECT/gradle.properties" \
-            && sed -i 's/^android.enableJetifier=.*/android.enableJetifier=true/' "$PROJECT/gradle.properties" \
-            || echo 'android.enableJetifier=true' >> "$PROJECT/gradle.properties"
+          touch "$PROPERTIES"
 
+          # AndroidX
+          if grep -q '^android.useAndroidX=' "$PROPERTIES"; then
+            sed -i \
+              's/^android.useAndroidX=.*/android.useAndroidX=true/' \
+              "$PROPERTIES"
+          else
+            echo 'android.useAndroidX=true' >> "$PROPERTIES"
+          fi
+
+          # Jetifier
+          if grep -q '^android.enableJetifier=' "$PROPERTIES"; then
+            sed -i \
+              's/^android.enableJetifier=.*/android.enableJetifier=true/' \
+              "$PROPERTIES"
+          else
+            echo 'android.enableJetifier=true' >> "$PROPERTIES"
+          fi
+
+          # IMPORTANT:
+          # Keep the existing project's Kotlin sourceSets DSL.
+          # Do NOT modify Kotlin source files.
+          if grep -q '^android.disallowKotlinSourceSets=' "$PROPERTIES"; then
+            sed -i \
+              's/^android.disallowKotlinSourceSets=.*/android.disallowKotlinSourceSets=false/' \
+              "$PROPERTIES"
+          else
+            echo 'android.disallowKotlinSourceSets=false' >> "$PROPERTIES"
+          fi
+
+          echo "--------------------------------"
+          echo "gradle.properties:"
+          cat "$PROPERTIES"
+          echo "--------------------------------"
+
+      # 10. Setup Gradle
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.3.1'
           cache-disabled: true
 
+      # 11. Prepare Gradle
+      - name: Prepare Gradle
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT="${{ steps.project.outputs.project }}"
+
+          cd "$PROJECT"
+
+          echo "Gradle version:"
+          gradle --version
+
+          echo "Project directory:"
+          pwd
+
+          echo "Project files:"
+          ls -la
+
+      # 12. Clean project
+      - name: Clean project
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT="${{ steps.project.outputs.project }}"
+
+          cd "$PROJECT"
+
+          gradle clean \
+            --no-daemon \
+            --stacktrace
+
+      # 13. Build TEST MITRA Debug APK
       - name: Build TEST MITRA Debug APK
         shell: bash
         run: |
-          cd "${{ steps.project.outputs.project }}"
-          gradle assembleDebug --no-daemon --stacktrace
+          set -e
 
+          PROJECT="${{ steps.project.outputs.project }}"
+
+          cd "$PROJECT"
+
+          echo "======================================"
+          echo "Building TEST MITRA Debug APK"
+          echo "======================================"
+
+          gradle assembleDebug \
+            --no-daemon \
+            --stacktrace \
+            --warning-mode all
+
+      # 14. Find APK
       - name: Find APK
         id: apk
         shell: bash
         run: |
-          APK=$(find "${{ steps.project.outputs.project }}/app/build/outputs/apk" -type f -name '*.apk' | head -n 1)
+          set -e
+
+          PROJECT="${{ steps.project.outputs.project }}"
+
+          APK=$(find "$PROJECT/app/build/outputs/apk" \
+            -type f \
+            -name '*.apk' \
+            | head -n 1)
 
           if [ -z "$APK" ]; then
-            echo "APK not found"
+            echo "ERROR: APK was not found."
+
+            echo "Build output:"
+            find "$PROJECT/app/build" \
+              -type f \
+              | sort || true
+
             exit 1
           fi
 
-          echo "APK=$APK"
+          echo "APK found:"
+          echo "$APK"
+
           echo "apk=$APK" >> "$GITHUB_OUTPUT"
 
+      # 15. Upload APK
       - name: Upload TEST MITRA APK
         uses: actions/upload-artifact@v4
         with:
@@ -114,5 +323,13 @@ jobs:
           path: ${{ steps.apk.outputs.apk }}
           if-no-files-found: error
 
+      # 16. Success
       - name: Build successful
-        run: echo "TEST MITRA APK BUILD SUCCESS"
+        shell: bash
+        run: |
+          echo ""
+          echo "======================================"
+          echo " TEST MITRA APK BUILD SUCCESSFUL"
+          echo "======================================"
+          echo ""
+          echo "APK artifact: TEST-MITRA-debug-apk"
