@@ -30,7 +30,7 @@ jobs:
 
 
       # ==========================================
-      # 3. FIND ZIP
+      # 3. FIND TEST MITRA ZIP
       # ==========================================
       - name: Find TEST MITRA ZIP
         shell: bash
@@ -49,7 +49,7 @@ jobs:
 
 
       # ==========================================
-      # 4. EXTRACT ZIP
+      # 4. EXTRACT TEST MITRA ZIP
       # ==========================================
       - name: Extract TEST MITRA ZIP
         shell: bash
@@ -93,7 +93,7 @@ jobs:
 
 
       # ==========================================
-      # 6. VERIFY PROJECT
+      # 6. VERIFY ANDROID PROJECT
       # ==========================================
       - name: Verify Android project
         shell: bash
@@ -123,15 +123,12 @@ jobs:
 
 
       # ==========================================
-      # 7. FIND AND CONFIGURE SDKMANAGER
+      # 7. CONFIGURE ANDROID SDK 36
       # ==========================================
       - name: Configure Android SDK 36
         shell: bash
         run: |
           set -e
-
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
 
           SDKMANAGER=""
 
@@ -149,8 +146,6 @@ jobs:
 
           if [ -z "$SDKMANAGER" ]; then
             echo "ERROR: sdkmanager could not be found."
-            echo "Searching Android SDK..."
-            find /usr/local/lib/android /opt/android-sdk /opt -type f -name sdkmanager 2>/dev/null | head -20 || true
             exit 1
           fi
 
@@ -209,23 +204,42 @@ jobs:
 
           touch gradle.properties
 
+          # AndroidX
           grep -q '^android.useAndroidX=' gradle.properties \
             || echo 'android.useAndroidX=true' >> gradle.properties
 
+          # Jetifier
           grep -q '^android.enableJetifier=' gradle.properties \
             || echo 'android.enableJetifier=true' >> gradle.properties
 
+          # JVM
           grep -q '^org.gradle.jvmargs=' gradle.properties \
             || echo 'org.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8' >> gradle.properties
 
+          # Kotlin style
           grep -q '^kotlin.code.style=' gradle.properties \
             || echo 'kotlin.code.style=official' >> gradle.properties
 
-          echo "Gradle properties configured."
+          # ======================================
+          # IMPORTANT FIX
+          # Kotlin sourceSets DSL compatibility
+          # ======================================
+          if grep -q '^android.disallowKotlinSourceSets=' gradle.properties; then
+            sed -i 's/^android.disallowKotlinSourceSets=.*/android.disallowKotlinSourceSets=false/' gradle.properties
+          else
+            echo 'android.disallowKotlinSourceSets=false' >> gradle.properties
+          fi
+
+          echo ""
+          echo "===================================="
+          echo "GRADLE PROPERTIES"
+          echo "===================================="
+
+          cat gradle.properties
 
 
       # ==========================================
-      # 10. COMPILE SDK 36
+      # 10. CONFIGURE COMPILE SDK 36
       # ==========================================
       - name: Configure Android compileSdk 36
         shell: bash
@@ -269,9 +283,8 @@ jobs:
 
           gradle --version
 
-          echo "===================================="
-          echo "GRADLE WRAPPER NOT REQUIRED"
-          echo "===================================="
+          echo ""
+          echo "Gradle wrapper is not required."
 
 
       # ==========================================
@@ -290,7 +303,7 @@ jobs:
 
 
       # ==========================================
-      # 13. BUILD APK
+      # 13. BUILD DEBUG APK
       # ==========================================
       - name: Build TEST MITRA Debug APK
         shell: bash
@@ -327,10 +340,7 @@ jobs:
 
           if [ -z "$APK" ]; then
             echo "ERROR: APK was not generated."
-
-            echo "Searching for APK files:"
             find . -type f -name '*.apk' -print || true
-
             exit 1
           fi
 
