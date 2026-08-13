@@ -12,16 +12,16 @@ jobs:
 
     steps:
 
-      # --------------------------------------------------
+      # ==========================================
       # 1. CHECKOUT
-      # --------------------------------------------------
+      # ==========================================
       - name: Checkout source
         uses: actions/checkout@v4
 
 
-      # --------------------------------------------------
+      # ==========================================
       # 2. JAVA 17
-      # --------------------------------------------------
+      # ==========================================
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -29,9 +29,9 @@ jobs:
           java-version: '17'
 
 
-      # --------------------------------------------------
-      # 3. FIND TEST MITRA ZIP
-      # --------------------------------------------------
+      # ==========================================
+      # 3. FIND ZIP
+      # ==========================================
       - name: Find TEST MITRA ZIP
         shell: bash
         run: |
@@ -48,9 +48,9 @@ jobs:
           echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
 
 
-      # --------------------------------------------------
+      # ==========================================
       # 4. EXTRACT ZIP
-      # --------------------------------------------------
+      # ==========================================
       - name: Extract TEST MITRA ZIP
         shell: bash
         run: |
@@ -64,9 +64,9 @@ jobs:
           echo "ZIP extracted successfully."
 
 
-      # --------------------------------------------------
+      # ==========================================
       # 5. LOCATE ANDROID PROJECT
-      # --------------------------------------------------
+      # ==========================================
       - name: Locate Android project
         shell: bash
         run: |
@@ -80,8 +80,7 @@ jobs:
 
           if [ -z "$PROJECT" ]; then
             echo "ERROR: Android project not found."
-            echo "Files found:"
-            find extracted -maxdepth 4 -type f | head -100
+            find extracted -maxdepth 5 -type f | head -200
             exit 1
           fi
 
@@ -93,9 +92,9 @@ jobs:
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
 
-      # --------------------------------------------------
+      # ==========================================
       # 6. VERIFY PROJECT
-      # --------------------------------------------------
+      # ==========================================
       - name: Verify Android project
         shell: bash
         run: |
@@ -104,10 +103,10 @@ jobs:
           cd "$PROJECT_DIR"
 
           echo "===================================="
-          echo "ANDROID PROJECT FILES"
+          echo "ANDROID PROJECT"
           echo "===================================="
 
-          find . -maxdepth 3 -type f | sort | head -150
+          pwd
 
           echo "===================================="
           echo "GRADLE FILES"
@@ -123,33 +122,66 @@ jobs:
           \) -print
 
 
-      # --------------------------------------------------
-      # 7. INSTALL ANDROID SDK 36
-      # --------------------------------------------------
+      # ==========================================
+      # 7. FIND AND CONFIGURE SDKMANAGER
+      # ==========================================
       - name: Configure Android SDK 36
         shell: bash
         run: |
           set -e
 
-          yes | sdkmanager --licenses >/dev/null || true
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
 
-          sdkmanager \
+          SDKMANAGER=""
+
+          if [ -n "$ANDROID_HOME" ]; then
+            SDKMANAGER="$(find "$ANDROID_HOME" -type f -name sdkmanager -print -quit 2>/dev/null || true)"
+          fi
+
+          if [ -z "$SDKMANAGER" ] && [ -n "$ANDROID_SDK_ROOT" ]; then
+            SDKMANAGER="$(find "$ANDROID_SDK_ROOT" -type f -name sdkmanager -print -quit 2>/dev/null || true)"
+          fi
+
+          if [ -z "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find /usr/local/lib/android /opt/android-sdk /opt -type f -name sdkmanager -print -quit 2>/dev/null || true)"
+          fi
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager could not be found."
+            echo "Searching Android SDK..."
+            find /usr/local/lib/android /opt/android-sdk /opt -type f -name sdkmanager 2>/dev/null | head -20 || true
+            exit 1
+          fi
+
+          echo "SDKMANAGER FOUND:"
+          echo "$SDKMANAGER"
+
+          SDK_DIR="$(dirname "$(dirname "$SDKMANAGER")")"
+
+          echo "ANDROID_SDK_ROOT=$SDK_DIR" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK_DIR" >> "$GITHUB_ENV"
+          echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
+
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+
+          "$SDKMANAGER" \
             "platform-tools" \
             "platforms;android-36" \
             "build-tools;36.0.0"
 
-          echo "Android SDK 36 installed."
+          echo "Android SDK 36 installed successfully."
 
 
-      # --------------------------------------------------
-      # 8. INSTALL GRADLE 8.11.1
-      # --------------------------------------------------
-      - name: Install Gradle 8.11.1
+      # ==========================================
+      # 8. INSTALL GRADLE 9.3.1
+      # ==========================================
+      - name: Install Gradle 9.3.1
         shell: bash
         run: |
           set -e
 
-          GRADLE_VERSION="8.11.1"
+          GRADLE_VERSION="9.3.1"
 
           wget -q \
             "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
@@ -165,9 +197,9 @@ jobs:
           /opt/gradle/gradle-${GRADLE_VERSION}/bin/gradle --version
 
 
-      # --------------------------------------------------
-      # 9. GRADLE PROPERTIES
-      # --------------------------------------------------
+      # ==========================================
+      # 9. CONFIGURE GRADLE
+      # ==========================================
       - name: Configure Gradle
         shell: bash
         run: |
@@ -192,9 +224,9 @@ jobs:
           echo "Gradle properties configured."
 
 
-      # --------------------------------------------------
-      # 10. FIX COMPILE SDK 36
-      # --------------------------------------------------
+      # ==========================================
+      # 10. COMPILE SDK 36
+      # ==========================================
       - name: Configure Android compileSdk 36
         shell: bash
         run: |
@@ -207,19 +239,23 @@ jobs:
             -o -name 'build.gradle.kts' \
           \) -print0 | while IFS= read -r -d '' FILE
           do
-            sed -i \
-              -E 's/(compileSdk[[:space:]]*=?[[:space:]]*)35/\136/g' "$FILE" || true
 
-            sed -i \
-              -E 's/(compileSdkVersion[[:space:]]+)[0-9]+/\136/g' "$FILE" || true
+            sed -i -E \
+              's/(compileSdk[[:space:]]*=?[[:space:]]*)35/\136/g' \
+              "$FILE" || true
+
+            sed -i -E \
+              's/(compileSdkVersion[[:space:]]+)[0-9]+/\136/g' \
+              "$FILE" || true
+
           done
 
-          echo "compileSdk compatibility checked."
+          echo "compileSdk 36 configured."
 
 
-      # --------------------------------------------------
-      # 11. REMOVE OLD BROKEN GRADLE WRAPPER DEPENDENCY
-      # --------------------------------------------------
+      # ==========================================
+      # 11. PREPARE GRADLE
+      # ==========================================
       - name: Prepare Gradle
         shell: bash
         run: |
@@ -227,15 +263,20 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          echo "Using installed Gradle:"
+          echo "===================================="
+          echo "GRADLE VERSION"
+          echo "===================================="
+
           gradle --version
 
-          echo "Gradle wrapper is NOT required."
+          echo "===================================="
+          echo "GRADLE WRAPPER NOT REQUIRED"
+          echo "===================================="
 
 
-      # --------------------------------------------------
-      # 12. CLEAN
-      # --------------------------------------------------
+      # ==========================================
+      # 12. CLEAN PROJECT
+      # ==========================================
       - name: Clean project
         shell: bash
         run: |
@@ -243,12 +284,14 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          gradle clean --no-daemon --stacktrace
+          gradle clean \
+            --no-daemon \
+            --stacktrace
 
 
-      # --------------------------------------------------
-      # 13. BUILD DEBUG APK
-      # --------------------------------------------------
+      # ==========================================
+      # 13. BUILD APK
+      # ==========================================
       - name: Build TEST MITRA Debug APK
         shell: bash
         run: |
@@ -270,9 +313,9 @@ jobs:
           echo "===================================="
 
 
-      # --------------------------------------------------
+      # ==========================================
       # 14. FIND APK
-      # --------------------------------------------------
+      # ==========================================
       - name: Find APK
         shell: bash
         run: |
@@ -284,11 +327,17 @@ jobs:
 
           if [ -z "$APK" ]; then
             echo "ERROR: APK was not generated."
-            find . -type f | grep -E '\.(apk|aab)$' || true
+
+            echo "Searching for APK files:"
+            find . -type f -name '*.apk' -print || true
+
             exit 1
           fi
 
-          echo "APK FOUND:"
+          echo "===================================="
+          echo "APK FOUND"
+          echo "===================================="
+
           echo "$APK"
 
           mkdir -p "$GITHUB_WORKSPACE/apk-output"
@@ -297,9 +346,9 @@ jobs:
             "$GITHUB_WORKSPACE/apk-output/TEST-MITRA-debug.apk"
 
 
-      # --------------------------------------------------
+      # ==========================================
       # 15. UPLOAD APK
-      # --------------------------------------------------
+      # ==========================================
       - name: Upload TEST MITRA APK
         uses: actions/upload-artifact@v4
         with:
@@ -308,13 +357,16 @@ jobs:
           if-no-files-found: error
 
 
-      # --------------------------------------------------
-      # 16. BUILD SUCCESSFUL
-      # --------------------------------------------------
+      # ==========================================
+      # 16. SUCCESS
+      # ==========================================
       - name: Build successful
         shell: bash
         run: |
-          echo "===================================="
-          echo "TEST MITRA APK BUILD SUCCESSFUL"
-          echo "===================================="
-          echo "APK artifact: TEST-MITRA-APK"
+          echo ""
+          echo "=========================================="
+          echo "       TEST MITRA APK BUILD SUCCESS"
+          echo "=========================================="
+          echo ""
+          echo "APK: TEST-MITRA-debug.apk"
+          echo ""
