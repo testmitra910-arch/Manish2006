@@ -11,152 +11,19 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout source
         uses: actions/checkout@v4
-
-
-      - name: Extract TEST MITRA project
-        shell: bash
-        run: |
-          set -e
-
-          ZIP_FILE=$(find . -type f -iname "*.zip" | head -n 1)
-
-          if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: ZIP file not found!"
-            exit 1
-          fi
-
-          echo "ZIP: $ZIP_FILE"
-
-          rm -rf extracted
-          mkdir -p extracted
-
-          unzip -q "$ZIP_FILE" -d extracted
-
-          echo "ZIP extracted successfully."
-
-
-      - name: Locate Android project
-        shell: bash
-        run: |
-          set -e
-
-          PROJECT_DIR=$(find "$GITHUB_WORKSPACE/extracted" \
-            -type f \
-            -name "settings.gradle.kts" \
-            -print -quit | xargs dirname)
-
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: Android project not found!"
-            exit 1
-          fi
-
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-
-          echo "Android project:"
-          echo "$PROJECT_DIR"
-
-
-      - name: Locate MainActivity
-        shell: bash
-        run: |
-          set -e
-
-          echo "Searching MainActivity.kt..."
-
-          MAIN_FILE=$(find "$PROJECT_DIR/app/src/main" \
-            -type f \
-            -name "MainActivity.kt" \
-            -print -quit)
-
-          if [ -z "$MAIN_FILE" ]; then
-            echo "ERROR: MainActivity.kt not found!"
-            echo "Available Kotlin files:"
-            find "$PROJECT_DIR/app/src/main" \
-              -type f \
-              -name "*.kt" \
-              -print
-            exit 1
-          fi
-
-          echo "MAIN_FILE=$MAIN_FILE" >> "$GITHUB_ENV"
-
-          echo "MainActivity found:"
-          echo "$MAIN_FILE"
-
-
-      - name: Fix MainActivity
-        shell: bash
-        run: |
-          set -e
-
-          echo "Checking MainActivity..."
-
-          python3 - "$MAIN_FILE" <<'PY'
-          import sys
-          from pathlib import Path
-
-          file = Path(sys.argv[1])
-
-          text = file.read_text(encoding="utf-8")
-
-          replacements = {
-              "adminProfile.isMainAdmin": "profile.isMainAdmin",
-              "adminProfile?.isMainAdmin": "profile?.isMainAdmin"
-          }
-
-          changed = False
-
-          for old, new in replacements.items():
-              if old in text:
-                  text = text.replace(old, new)
-                  changed = True
-
-          if changed:
-              file.write_text(text, encoding="utf-8")
-              print("MainActivity fixed successfully.")
-          else:
-              print("No adminProfile reference requiring replacement was found.")
-          PY
-
-
-      - name: Fix Gradle Kotlin source set compatibility
-        shell: bash
-        run: |
-          set -e
-
-          PROPS="$PROJECT_DIR/gradle.properties"
-
-          touch "$PROPS"
-
-          if grep -q "^android.disallowKotlinSourceSets=" "$PROPS"; then
-            sed -i \
-              's/^android.disallowKotlinSourceSets=.*/android.disallowKotlinSourceSets=false/' \
-              "$PROPS"
-          else
-            echo "" >> "$PROPS"
-            echo "# TEST MITRA compatibility" >> "$PROPS"
-            echo "android.disallowKotlinSourceSets=false" >> "$PROPS"
-          fi
-
-          echo "gradle.properties:"
-          cat "$PROPS"
-
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
 
-
-      - name: Set up Gradle
+      - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "9.3.1"
-
+          gradle-version: '9.3.1'
 
       - name: Create .env from GitHub Secrets
         shell: bash
@@ -166,91 +33,97 @@ jobs:
         run: |
           set -e
 
-          if [ -z "$SUPABASE_URL" ]; then
-            echo "ERROR: SUPABASE_URL secret is missing!"
+          test -n "$SUPABASE_URL" || {
+            echo "ERROR: GitHub Secret SUPABASE_URL is missing"
             exit 1
-          fi
+          }
 
-          if [ -z "$SUPABASE_ANON_KEY" ]; then
-            echo "ERROR: SUPABASE_ANON_KEY secret is missing!"
+          test -n "$SUPABASE_ANON_KEY" || {
+            echo "ERROR: GitHub Secret SUPABASE_ANON_KEY is missing"
             exit 1
-          fi
+          }
 
-          printf 'SUPABASE_URL=%s\n' "$SUPABASE_URL" > "$PROJECT_DIR/.env"
-          printf 'SUPABASE_ANON_KEY=%s\n' "$SUPABASE_ANON_KEY" >> "$PROJECT_DIR/.env"
+          case "$SUPABASE_URL" in
+            https://*) ;;
+            *)
+              echo "ERROR: SUPABASE_URL must start with https://"
+              exit 1
+              ;;
+          esac
 
-          echo ".env created successfully."
+          printf 'SUPABASE_URL=%s\nSUPABASE_ANON_KEY=%s\n' \
+            "$SUPABASE_URL" "$SUPABASE_ANON_KEY" > .env
 
-
-      - name: Check project
+      - name: Fix MainActivity settings reference
         shell: bash
         run: |
           set -e
 
-          cd "$PROJECT_DIR"
+          FILE="app/src/main/java/com/example/MainActivity.kt"
 
-          echo "================================"
-          echo "TEST MITRA PROJECT"
-          echo "================================"
+          test -f "$FILE" || {
+            echo "ERROR: $FILE not found"
+            exit 1
+          }
 
-          echo "MainActivity:"
-          echo "$MAIN_FILE"
+          python3 - <<'PY'
+          from pathlib import Path
 
-          echo "Gradle version:"
-          gradle --version
+          p = Path("app/src/main/java/com/example/MainActivity.kt")
+          text = p.read_text(encoding="utf-8")
 
-          echo "================================"
+          old1 = 'onOpenSettings = { if (adminProfile.isMainAdmin) showSupabaseConfigDialog = true },'
+          old2 = 'onOpenSettings = { if (profile.isMainAdmin) showSupabaseConfigDialog = true },'
+          new  = 'onOpenSettings = { if (profile.isMainAdmin) showSupabaseConfigDialog = true },'
 
+          if old1 in text:
+              text = text.replace(old1, new, 1)
+              p.write_text(text, encoding="utf-8")
+              print("Fixed: adminProfile -> profile")
+          elif old2 in text:
+              print("Already correct: profile.isMainAdmin")
+          else:
+              print("No matching settings reference found; continuing.")
+          PY
+
+      - name: Verify Android project
+        shell: bash
+        run: |
+          set -e
+
+          test -f settings.gradle.kts
+          test -f app/build.gradle.kts
+          test -f app/src/main/AndroidManifest.xml
+          test -f app/src/main/java/com/example/MainActivity.kt
+
+          echo "Android project files OK"
 
       - name: Build Debug APK
         shell: bash
         run: |
           set -e
 
-          cd "$PROJECT_DIR"
-
-          echo "================================"
-          echo "BUILDING TEST MITRA APK"
-          echo "================================"
-
-          gradle \
-            --no-daemon \
-            --stacktrace \
-            clean \
-            assembleDebug
-
-          echo "================================"
-          echo "BUILD SUCCESSFUL"
-          echo "================================"
-
+          gradle --no-daemon --stacktrace clean assembleDebug
 
       - name: Find APK
         shell: bash
         run: |
           set -e
 
-          echo "Searching APK..."
+          APK="$(find app/build/outputs/apk/debug \
+            -type f -name '*.apk' | head -n 1)"
 
-          APK=$(find "$PROJECT_DIR/app/build/outputs" \
-            -type f \
-            -name "*.apk" \
-            -print -quit)
-
-          if [ -z "$APK" ]; then
-            echo "ERROR: APK not found!"
+          test -n "$APK" || {
+            echo "ERROR: APK not found"
             exit 1
-          fi
+          }
 
-          echo "APK found:"
-          echo "$APK"
-
-          echo "APK_PATH=$APK" >> "$GITHUB_ENV"
-
+          echo "APK created: $APK"
 
       - name: Upload TEST MITRA APK
         uses: actions/upload-artifact@v4
         with:
-          name: TEST-MITRA-APK
-          path: ${{ env.APK_PATH }}
+          name: TEST-MITRA-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 30
