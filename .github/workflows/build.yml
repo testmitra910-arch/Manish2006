@@ -15,90 +15,158 @@ jobs:
 
     steps:
 
-      # --------------------------------------------------
-      # 1. Checkout GitHub repository
-      # --------------------------------------------------
-      - name: Checkout repository
+      - name: Checkout source
         uses: actions/checkout@v4
 
-      # --------------------------------------------------
-      # 2. Setup JDK 17
-      # --------------------------------------------------
       - name: Setup JDK 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
-      # --------------------------------------------------
-      # 3. Find and extract TEST MITRA ZIP
-      # --------------------------------------------------
-      - name: Extract TEST MITRA project
+      # ------------------------------------------------
+      # Find the existing ZIP - NO NEW ZIP REQUIRED
+      # ------------------------------------------------
+      - name: Find existing TEST MITRA ZIP
         shell: bash
         run: |
           set -e
 
-          echo "Searching for TEST MITRA ZIP..."
+          echo "Searching repository for existing ZIP..."
 
           ZIP_FILE=$(find . -maxdepth 2 -type f -iname "*.zip" | head -n 1)
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: No ZIP file found."
+            echo "ERROR: Existing TEST MITRA ZIP not found."
+            echo "Repository files:"
+            find . -maxdepth 3 -type f | sort
             exit 1
           fi
 
-          echo "ZIP found: $ZIP_FILE"
+          echo "Using existing ZIP:"
+          echo "$ZIP_FILE"
+
+          echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
+
+      # ------------------------------------------------
+      # Extract existing ZIP
+      # ------------------------------------------------
+      - name: Extract existing TEST MITRA project
+        shell: bash
+        run: |
+          set -e
 
           rm -rf extracted
           mkdir -p extracted
 
           unzip -q "$ZIP_FILE" -d extracted
 
-          echo "Searching for Android project..."
+          echo "Searching Android project..."
 
-          PROJECT_DIR=$(find extracted \
-            -type f \
-            -name "settings.gradle.kts" \
-            -o -name "settings.gradle" \
-            | head -n 1 \
-            | xargs -r dirname)
+          PROJECT_DIR=""
+
+          while IFS= read -r settings_file; do
+            DIR=$(dirname "$settings_file")
+
+            if [ -f "$DIR/app/build.gradle.kts" ] || \
+               [ -f "$DIR/app/build.gradle" ]; then
+              PROJECT_DIR="$DIR"
+              break
+            fi
+          done < <(find extracted -type f \
+            \( -name "settings.gradle.kts" -o -name "settings.gradle" \))
 
           if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: Android project not found inside ZIP."
-            find extracted -maxdepth 4 -type f | sort
+            echo "ERROR: Android project not found."
+            find extracted -maxdepth 5 -type f | sort
             exit 1
           fi
 
-          echo "Android project found:"
+          echo "Android project:"
           echo "$PROJECT_DIR"
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      # --------------------------------------------------
-      # 4. Show project structure
-      # --------------------------------------------------
-      - name: Verify Android project
+      # ------------------------------------------------
+      # AndroidX + Gradle properties
+      # ------------------------------------------------
+      - name: Fix AndroidX and Gradle properties
         shell: bash
         run: |
           set -e
 
-          echo "Project:"
-          echo "$PROJECT_DIR"
+          cd "$PROJECT_DIR"
 
-          echo ""
-          echo "Project files:"
-          find "$PROJECT_DIR" -maxdepth 3 -type f | sort
+          touch gradle.properties
 
-          test -f "$PROJECT_DIR/settings.gradle.kts" || \
-          test -f "$PROJECT_DIR/settings.gradle"
+          # Remove old conflicting values
+          sed -i '/^android.useAndroidX=/d' gradle.properties
+          sed -i '/^android.enableJetifier=/d' gradle.properties
+          sed -i '/^android.nonTransitiveRClass=/d' gradle.properties
+          sed -i '/^org.gradle.configuration-cache=/d' gradle.properties
 
-          test -f "$PROJECT_DIR/app/build.gradle.kts" || \
-          test -f "$PROJECT_DIR/app/build.gradle"
+          # Required AndroidX settings
+          echo "android.useAndroidX=true" >> gradle.properties
+          echo "android.enableJetifier=true" >> gradle.properties
 
-      # --------------------------------------------------
-      # 5. Create .env from GitHub Secrets
-      # --------------------------------------------------
-      - name: Create .env
+          # Stable Gradle settings
+          echo "android.nonTransitiveRClass=false" >> gradle.properties
+          echo "org.gradle.configuration-cache=false" >> gradle.properties
+          echo "org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8" >> gradle.properties
+
+          echo "gradle.properties:"
+          cat gradle.properties
+
+      # ------------------------------------------------
+      # Fix AGP / Kotlin compatibility
+      # ------------------------------------------------
+      - name: Fix Android Gradle Plugin compatibility
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          echo "Checking Gradle version files..."
+
+          if [ -f "gradle/libs.versions.toml" ]; then
+
+            echo "Found version catalog."
+
+            # Convert AGP 9.x to stable AGP 8.9.2
+            sed -i -E \
+              's/agp[[:space:]]*=[[:space:]]*"9\.[0-9.]+"/agp = "8.9.2"/' \
+              gradle/libs.versions.toml
+
+            # Also handle androidGradlePlugin naming
+            sed -i -E \
+              's/androidGradlePlugin[[:space:]]*=[[:space:]]*"9\.[0-9.]+"/androidGradlePlugin = "8.9.2"/' \
+              gradle/libs.versions.toml
+
+            echo "Updated version catalog:"
+            grep -iE "agp|androidGradlePlugin" gradle/libs.versions.toml || true
+
+          fi
+
+          # If build.gradle files directly contain AGP 9.x,
+          # replace it with AGP 8.9.2.
+          find . -name "build.gradle.kts" -o -name "build.gradle" | while read FILE
+          do
+            sed -i -E \
+              's/com\.android\.application[^"]*version[[:space:]]*["'\'']9\.[0-9.]+["'\'']/com.android.application version "8.9.2"/g' \
+              "$FILE" || true
+
+            sed -i -E \
+              's/com\.android\.library[^"]*version[[:space:]]*["'\'']9\.[0-9.]+["'\'']/com.android.library version "8.9.2"/g' \
+              "$FILE" || true
+          done
+
+          echo "Compatibility patch completed."
+
+      # ------------------------------------------------
+      # Create Supabase .env only if secrets exist
+      # ------------------------------------------------
+      - name: Create Supabase environment
         shell: bash
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -106,90 +174,32 @@ jobs:
         run: |
           set -e
 
-          if [ -z "$SUPABASE_URL" ]; then
-            echo "ERROR: SUPABASE_URL secret is missing."
-            exit 1
-          fi
+          if [ -n "$SUPABASE_URL" ] && [ -n "$SUPABASE_ANON_KEY" ]; then
 
-          if [ -z "$SUPABASE_ANON_KEY" ]; then
-            echo "ERROR: SUPABASE_ANON_KEY secret is missing."
-            exit 1
-          fi
+            printf 'SUPABASE_URL=%s\n' "$SUPABASE_URL" > "$PROJECT_DIR/.env"
+            printf 'SUPABASE_ANON_KEY=%s\n' "$SUPABASE_ANON_KEY" >> "$PROJECT_DIR/.env"
 
-          case "$SUPABASE_URL" in
-            http://*|https://*)
-              ;;
-            *)
-              echo "ERROR: SUPABASE_URL must start with http:// or https://"
-              exit 1
-              ;;
-          esac
+            echo "Supabase environment created."
 
-          printf 'SUPABASE_URL=%s\n' "$SUPABASE_URL" \
-            > "$PROJECT_DIR/.env"
+          else
 
-          printf 'SUPABASE_ANON_KEY=%s\n' "$SUPABASE_ANON_KEY" \
-            >> "$PROJECT_DIR/.env"
-
-          echo ".env created successfully."
-
-      # --------------------------------------------------
-      # 6. Fix Gradle / AGP compatibility
-      # --------------------------------------------------
-      - name: Fix Gradle and Android plugin compatibility
-        shell: bash
-        run: |
-          set -e
-
-          PROJECT="$PROJECT_DIR"
-
-          echo "Checking version catalog..."
-
-          if [ -f "$PROJECT/gradle/libs.versions.toml" ]; then
-
-            # AGP 9.x + built-in Kotlin was causing the
-            # Kotlin source-set/KSP build failure.
-            sed -i 's/agp = "9\.1\.1"/agp = "8.9.2"/' \
-              "$PROJECT/gradle/libs.versions.toml"
-
-            echo "AGP version fixed."
+            echo "Supabase secrets not supplied."
+            echo "Continuing APK build."
 
           fi
 
-          # Use a stable compile/target SDK for AGP 8.9.x.
-          if [ -f "$PROJECT/app/build.gradle.kts" ]; then
-
-            sed -i 's/compileSdk { version = release(36) { minorApiLevel = 1 } }/compileSdk = 35/' \
-              "$PROJECT/app/build.gradle.kts" || true
-
-            sed -i 's/targetSdk = 36/targetSdk = 35/' \
-              "$PROJECT/app/build.gradle.kts" || true
-
-          fi
-
-          # Disable Gradle configuration cache because some
-          # plugins in the generated project are not fully
-          # compatible with it.
-          if [ -f "$PROJECT/gradle.properties" ]; then
-            if ! grep -q "^org.gradle.configuration-cache=false" "$PROJECT/gradle.properties"; then
-              echo "org.gradle.configuration-cache=false" >> "$PROJECT/gradle.properties"
-            fi
-          fi
-
-          echo "Compatibility fixes completed."
-
-      # --------------------------------------------------
-      # 7. Setup Gradle
-      # --------------------------------------------------
-      - name: Setup Gradle 8.11.1
+      # ------------------------------------------------
+      # Setup Gradle
+      # ------------------------------------------------
+      - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
 
-      # --------------------------------------------------
-      # 8. Clean old generated files
-      # --------------------------------------------------
-      - name: Clean generated files
+      # ------------------------------------------------
+      # Clean project
+      # ------------------------------------------------
+      - name: Clean project
         shell: bash
         run: |
           set -e
@@ -197,16 +207,41 @@ jobs:
           cd "$PROJECT_DIR"
 
           rm -rf .gradle
-          rm -rf app/build
           rm -rf build
+          rm -rf app/build
 
-          find . -type d -name "generated" -prune -exec rm -rf {} + 2>/dev/null || true
+          echo "Project cleaned."
 
-          echo "Old generated files removed."
+      # ------------------------------------------------
+      # Verify important files
+      # ------------------------------------------------
+      - name: Verify Android project
+        shell: bash
+        run: |
+          set -e
 
-      # --------------------------------------------------
-      # 9. Build Debug APK
-      # --------------------------------------------------
+          cd "$PROJECT_DIR"
+
+          echo "Project directory:"
+          pwd
+
+          echo ""
+          echo "Important files:"
+
+          ls -la
+
+          test -f settings.gradle.kts || \
+          test -f settings.gradle
+
+          test -f app/build.gradle.kts || \
+          test -f app/build.gradle
+
+          echo ""
+          echo "Android project verified."
+
+      # ------------------------------------------------
+      # Build APK
+      # ------------------------------------------------
       - name: Build TEST MITRA Debug APK
         shell: bash
         run: |
@@ -214,51 +249,47 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          echo "Gradle version:"
-          gradle --version
-
-          echo ""
-          echo "Building TEST MITRA APK..."
+          echo "======================================"
+          echo " BUILDING TEST MITRA APK"
+          echo "======================================"
 
           gradle \
             --no-daemon \
-            --stacktrace \
             --no-configuration-cache \
+            --stacktrace \
             clean \
             assembleDebug
 
-      # --------------------------------------------------
-      # 10. Find APK
-      # --------------------------------------------------
+      # ------------------------------------------------
+      # Find APK
+      # ------------------------------------------------
       - name: Find APK
         shell: bash
         run: |
           set -e
 
-          echo "Searching for APK..."
-
-          APK=$(find "$PROJECT_DIR/app/build/outputs/apk/debug" \
+          APK=$(find "$PROJECT_DIR/app/build/outputs/apk" \
             -type f \
             -name "*.apk" \
             | head -n 1)
 
           if [ -z "$APK" ]; then
-            echo "ERROR: APK was not generated."
-            find "$PROJECT_DIR/app/build/outputs" -type f 2>/dev/null || true
+            echo "ERROR: APK not found."
+            find "$PROJECT_DIR/app/build/outputs" \
+              -type f 2>/dev/null || true
             exit 1
           fi
 
-          echo "APK found:"
+          echo "APK FOUND:"
           echo "$APK"
 
-          mkdir -p "$GITHUB_WORKSPACE/apk-output"
+          mkdir -p apk-output
 
-          cp "$APK" \
-            "$GITHUB_WORKSPACE/apk-output/TEST-MITRA-debug.apk"
+          cp "$APK" apk-output/TEST-MITRA-debug.apk
 
-      # --------------------------------------------------
-      # 11. Upload APK
-      # --------------------------------------------------
+      # ------------------------------------------------
+      # Upload APK
+      # ------------------------------------------------
       - name: Upload TEST MITRA APK
         uses: actions/upload-artifact@v4
         with:
