@@ -39,7 +39,7 @@ jobs:
           mkdir -p extracted
           unzip -q "$ZIP_FILE" -d extracted
 
-          echo "Extracted project:"
+          echo "Extracted files:"
           find extracted -maxdepth 4 -type f | head -200
 
       - name: Locate Android project
@@ -63,6 +63,28 @@ jobs:
           echo "Android project found:"
           echo "$PROJECT_DIR"
 
+      - name: Fix Kotlin source set compatibility
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          echo "Applying Kotlin source set compatibility fix..."
+
+          if [ -f gradle.properties ]; then
+            if grep -q "^android.disallowKotlinSourceSets=" gradle.properties; then
+              sed -i 's/^android.disallowKotlinSourceSets=.*/android.disallowKotlinSourceSets=false/' gradle.properties
+            else
+              echo "android.disallowKotlinSourceSets=false" >> gradle.properties
+            fi
+          else
+            echo "android.disallowKotlinSourceSets=false" > gradle.properties
+          fi
+
+          echo "gradle.properties:"
+          cat gradle.properties
+
       - name: Setup Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -71,7 +93,6 @@ jobs:
       - name: Check Gradle
         shell: bash
         run: |
-          echo "Gradle version:"
           gradle --version
 
       - name: Check Android project
@@ -79,7 +100,7 @@ jobs:
         run: |
           cd "$PROJECT_DIR"
 
-          echo "Current directory:"
+          echo "Project directory:"
           pwd
 
           echo "Project files:"
@@ -92,7 +113,7 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          echo "Building TEST MITRA..."
+          echo "Building TEST MITRA APK..."
 
           gradle --no-daemon --stacktrace assembleDebug
 
@@ -101,7 +122,7 @@ jobs:
         run: |
           set -e
 
-          echo "Searching APK..."
+          echo "Searching for APK..."
 
           find "$PROJECT_DIR" -type f -name "*.apk" -print
 
