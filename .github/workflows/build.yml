@@ -1,0 +1,96 @@
+name: Build TEST MITRA APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      # Checkout repository
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      # Java
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Android SDK
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      # Install common Android SDK components
+      - name: Install Android SDK components
+        run: |
+          sdkmanager "platform-tools"
+          sdkmanager "platforms;android-35"
+          sdkmanager "build-tools;35.0.0"
+
+      # Extract uploaded TEST MITRA ZIP
+      - name: Extract TEST MITRA project
+        run: |
+          mkdir -p extracted
+
+          ZIP_FILE=$(find . -maxdepth 1 -type f -iname "TEST-MITRA-*.zip" | head -n 1)
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: TEST-MITRA ZIP file not found!"
+            exit 1
+          fi
+
+          echo "Using ZIP: $ZIP_FILE"
+
+          unzip -o "$ZIP_FILE" -d extracted
+
+          echo "Extracted files:"
+          find extracted -maxdepth 3 -type f | head -100
+
+      # Find Android project
+      - name: Locate Android project
+        run: |
+          GRADLE_FILE=$(find extracted -name "gradlew" -type f | head -n 1)
+
+          if [ -z "$GRADLE_FILE" ]; then
+            echo "ERROR: gradlew not found inside ZIP!"
+            echo "Checking project files..."
+            find extracted -maxdepth 5 -type f
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$GRADLE_FILE")
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "Android project found at:"
+          echo "$PROJECT_DIR"
+
+      # Make Gradle executable
+      - name: Prepare Gradle
+        run: |
+          chmod +x "$PROJECT_DIR/gradlew"
+
+      # Build Debug APK
+      - name: Build Debug APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          ./gradlew assembleDebug --stacktrace
+
+      # Find APK
+      - name: Find APK
+        run: |
+          echo "APK files:"
+          find "$PROJECT_DIR" -type f -name "*.apk"
+
+      # Upload APK
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: TEST-MITRA-APK
+          path: |
+            ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
