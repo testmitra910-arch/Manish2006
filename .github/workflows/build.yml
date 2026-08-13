@@ -8,10 +8,11 @@ on:
 
 jobs:
   build:
-    name: Build APK
+    name: Build TEST MITRA APK
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Checkout source
         uses: actions/checkout@v4
 
@@ -38,7 +39,7 @@ jobs:
           mkdir -p extracted
           unzip -q "$ZIP_FILE" -d extracted
 
-          echo "Extracted files:"
+          echo "Extracted project:"
           find extracted -maxdepth 4 -type f | head -200
 
       - name: Locate Android project
@@ -46,37 +47,43 @@ jobs:
         run: |
           set -e
 
-          PROJECT_DIR=$(find extracted -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+          PROJECT_DIR=$(find extracted \
+            -type f \
+            \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
             -exec dirname {} \; | head -n 1)
 
           if [ -z "$PROJECT_DIR" ]; then
             echo "ERROR: Android Gradle project not found!"
-            echo "Checking extracted files:"
             find extracted -maxdepth 5 -type f
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Android project found at: $PROJECT_DIR"
 
-      - name: Setup Gradle
+          echo "Android project found:"
+          echo "$PROJECT_DIR"
+
+      - name: Setup Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.11.1'
+          gradle-version: '9.3.1'
 
-      - name: Check Gradle project
+      - name: Check Gradle
+        shell: bash
+        run: |
+          echo "Gradle version:"
+          gradle --version
+
+      - name: Check Android project
         shell: bash
         run: |
           cd "$PROJECT_DIR"
 
-          echo "Project directory:"
+          echo "Current directory:"
           pwd
 
           echo "Project files:"
           ls -la
-
-          echo "Gradle version:"
-          gradle --version
 
       - name: Build Debug APK
         shell: bash
@@ -85,12 +92,16 @@ jobs:
 
           cd "$PROJECT_DIR"
 
+          echo "Building TEST MITRA..."
+
           gradle --no-daemon --stacktrace assembleDebug
 
       - name: Find APK
         shell: bash
         run: |
-          echo "Searching for APK..."
+          set -e
+
+          echo "Searching APK..."
 
           find "$PROJECT_DIR" -type f -name "*.apk" -print
 
@@ -101,7 +112,9 @@ jobs:
             exit 1
           fi
 
-          echo "APK found: $APK"
+          echo "APK FOUND:"
+          echo "$APK"
+
           echo "APK_PATH=$APK" >> "$GITHUB_ENV"
 
       - name: Upload APK
