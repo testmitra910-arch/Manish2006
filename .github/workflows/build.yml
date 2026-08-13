@@ -6,212 +6,167 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
 
-      # ==================================================
-      # 1. CHECKOUT
-      # ==================================================
+      # 1. Checkout repository
       - name: Checkout source
         uses: actions/checkout@v4
 
-
-      # ==================================================
-      # 2. JAVA 17
-      # ==================================================
+      # 2. Setup JDK 17
       - name: Set up JDK 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+          cache: gradle
 
+      # 3. Find and extract TEST MITRA ZIP
+      - name: Extract TEST MITRA project
+        shell: bash
+        run: |
+          set -e
 
-      # ==================================================
-      # 3. LOCATE ANDROID PROJECT
-      # ==================================================
+          echo "Repository contents:"
+          find . -maxdepth 3 -type f | sort | head -300
+
+          ZIP_FILE=$(find . -maxdepth 3 -type f \
+            \( -iname "*.zip" \) \
+            | head -1)
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: No ZIP file found."
+            exit 1
+          fi
+
+          echo "Using ZIP: $ZIP_FILE"
+
+          rm -rf extracted
+          mkdir -p extracted
+
+          unzip -q "$ZIP_FILE" -d extracted
+
+          echo "Extracted files:"
+          find extracted -maxdepth 4 -type f | sort | head -300
+
+      # 4. Locate Android project automatically
       - name: Locate Android project
         shell: bash
         run: |
           set -e
 
-          echo "======================================"
           echo "Searching for Android project..."
-          echo "======================================"
 
           PROJECT_DIR=""
 
-          if [ -f "settings.gradle" ] || [ -f "settings.gradle.kts" ]; then
-            PROJECT_DIR="$PWD"
-          else
-            PROJECT_DIR=$(find "$PWD" \
+          while IFS= read -r settings_file; do
+            DIR="$(dirname "$settings_file")"
+
+            if [ -f "$DIR/gradlew" ] || \
+               [ -f "$DIR/settings.gradle" ] || \
+               [ -f "$DIR/settings.gradle.kts" ]; then
+              PROJECT_DIR="$DIR"
+              break
+            fi
+          done < <(find "$GITHUB_WORKSPACE/extracted" \
+            -type f \
+            \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+            2>/dev/null)
+
+          if [ -z "$PROJECT_DIR" ]; then
+            while IFS= read -r gradle_file; do
+              DIR="$(dirname "$gradle_file")"
+
+              if [ -f "$DIR/app/build.gradle" ] || \
+                 [ -f "$DIR/app/build.gradle.kts" ]; then
+                PROJECT_DIR="$DIR"
+                break
+              fi
+            done < <(find "$GITHUB_WORKSPACE/extracted" \
               -type f \
-              \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
-              -print -quit | xargs -r dirname)
+              \( -name "build.gradle" -o -name "build.gradle.kts" \) \
+              2>/dev/null)
           fi
 
           if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: Android project not found."
-            echo ""
-            echo "Repository files:"
-            find "$PWD" -maxdepth 6 -type f | sort | head -300
+            echo "ERROR: Android project not found after ZIP extraction."
+            echo "All extracted files:"
+            find "$GITHUB_WORKSPACE/extracted" -maxdepth 6 -type f | sort
             exit 1
           fi
 
-          echo ""
+          PROJECT_DIR="$(realpath "$PROJECT_DIR")"
+
           echo "Android project found:"
           echo "$PROJECT_DIR"
-          echo ""
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-
-      # ==================================================
-      # 4. CHECK ANDROID PROJECT
-      # ==================================================
-      - name: Verify Android project
-        shell: bash
-        run: |
-          set -e
-
-          cd "$PROJECT_DIR"
-
-          echo "Current directory:"
-          pwd
-
-          echo ""
-          echo "Project files:"
-          find . -maxdepth 3 -type f | sort | head -300
-
-          echo ""
-
-          if [ ! -f "settings.gradle" ] && [ ! -f "settings.gradle.kts" ]; then
-            echo "ERROR: settings.gradle or settings.gradle.kts not found."
-            exit 1
-          fi
-
-          if [ ! -d "app" ]; then
-            echo "ERROR: app folder not found."
-            exit 1
-          fi
-
-          if [ ! -f "app/build.gradle" ] && [ ! -f "app/build.gradle.kts" ]; then
-            echo "ERROR: app/build.gradle or app/build.gradle.kts not found."
-            exit 1
-          fi
-
-          echo "Android project verification successful."
-
-
-      # ==================================================
-      # 5. CREATE GOOGLE SERVICES JSON
-      # ==================================================
+      # 5. Create google-services.json from GitHub Secret
       - name: Create google-services.json
         shell: bash
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
         run: |
           set -e
 
-          cd "$PROJECT_DIR"
-
-          if [ -n "${{ secrets.GOOGLE_SERVICES_JSON }}" ]; then
-
-            echo "Using GOOGLE_SERVICES_JSON secret."
-
-            printf '%s' '${{ secrets.GOOGLE_SERVICES_JSON }}' \
-              > app/google-services.json
-
-          elif [ -f "app/google-services.json" ]; then
-
-            echo "google-services.json already exists."
-
-          else
-
-            echo "GOOGLE_SERVICES_JSON secret not found."
-            echo "Creating temporary build configuration."
-
-            cat > app/google-services.json <<'EOF'
-          {
-            "project_info": {
-              "project_number": "000000000000",
-              "project_id": "test-mitra-build",
-              "storage_bucket": "test-mitra-build.appspot.com"
-            },
-            "client": [
-              {
-                "client_info": {
-                  "mobilesdk_app_id": "1:000000000000:android:0000000000000000",
-                  "android_client_info": {
-                    "package_name": "com.example.testmitra"
-                  }
-                },
-                "oauth_client": [],
-                "api_key": [
-                  {
-                    "current_key": "dummy"
-                  }
-                ],
-                "services": {
-                  "appinvite_service": {
-                    "status": 2
-                  }
-                }
-              }
-            ],
-            "configuration_version": "1"
-          }
-          EOF
-
+          if [ -z "$GOOGLE_SERVICES_JSON" ]; then
+            echo "GOOGLE_SERVICES_JSON secret not set."
+            echo "Continuing without Google Services file."
+            exit 0
           fi
 
-          echo "Google services configuration ready."
+          mkdir -p "$PROJECT_DIR/app"
 
+          printf '%s' "$GOOGLE_SERVICES_JSON" \
+            > "$PROJECT_DIR/app/google-services.json"
 
-      # ==================================================
-      # 6. REMOVE DUPLICATE GOOGLE SERVICES FILES
-      # ==================================================
+          echo "google-services.json created."
+
+      # 6. Remove duplicate google-services.json files
       - name: Fix duplicate google-services files
         shell: bash
         run: |
           set -e
 
-          cd "$PROJECT_DIR"
+          FIRST_FILE=""
 
-          echo "Searching duplicate google-services.json files..."
+          while IFS= read -r file; do
+            if [ -z "$FIRST_FILE" ]; then
+              FIRST_FILE="$file"
+            else
+              echo "Removing duplicate: $file"
+              rm -f "$file"
+            fi
+          done < <(
+            find "$PROJECT_DIR/app" \
+              -type f \
+              -name "google-services.json" \
+              2>/dev/null
+          )
 
-          find app/src -type f \
-            -name "google-services.json" \
-            -print || true
+          echo "Google services cleanup complete."
 
-          rm -f app/src/debug/google-services.json
-          rm -f app/src/Debug/google-services.json
-
-          echo "Duplicate files cleaned."
-
-
-      # ==================================================
-      # 7. FIX KOTLIN SOURCE SET COMPATIBILITY
-      # ==================================================
+      # 7. Fix Kotlin source-set compatibility
       - name: Fix Kotlin source set compatibility
         shell: bash
         run: |
           set -e
 
-          cd "$PROJECT_DIR"
+          echo "Checking Kotlin files..."
 
-          touch gradle.properties
+          find "$PROJECT_DIR/app/src/main" \
+            -type f \
+            \( -name "*.kt" -o -name "*.java" \) \
+            -print 2>/dev/null || true
 
-          if ! grep -q "^android.disallowKotlinSourceSets=false" gradle.properties; then
-            echo "android.disallowKotlinSourceSets=false" >> gradle.properties
-          fi
-
-          echo "Kotlin source set compatibility configured."
-
-
-      # ==================================================
-      # 8. MAKE GRADLE EXECUTABLE
-      # ==================================================
+      # 8. Prepare Gradle
       - name: Prepare Gradle
         shell: bash
         run: |
@@ -219,57 +174,85 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          if [ ! -f "./gradlew" ]; then
-            echo "ERROR: gradlew not found."
-            exit 1
+          if [ ! -f "gradlew" ]; then
+            echo "gradlew not found. Generating wrapper..."
+
+            GRADLE_VERSION="8.7"
+
+            if command -v gradle >/dev/null 2>&1; then
+              gradle wrapper --gradle-version "$GRADLE_VERSION"
+            else
+              curl -L \
+                "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
+                -o /tmp/gradle.zip
+
+              mkdir -p /tmp/gradle
+
+              unzip -q /tmp/gradle.zip -d /tmp/gradle
+
+              /tmp/gradle/gradle-${GRADLE_VERSION}/bin/gradle wrapper \
+                --gradle-version "$GRADLE_VERSION"
+            fi
           fi
 
-          chmod +x ./gradlew
+          chmod +x gradlew
 
+          echo "Gradle wrapper:"
           ./gradlew --version
 
-
-      # ==================================================
-      # 9. VERIFY MAIN ACTIVITY
-      # ==================================================
-      - name: Verify MainActivity
+      # 9. Verify project
+      - name: Verify Android project
         shell: bash
         run: |
           set -e
 
           cd "$PROJECT_DIR"
 
-          echo "Searching MainActivity.kt..."
+          echo "Project directory:"
+          pwd
 
-          MAIN_ACTIVITY=$(find app/src/main \
-            -type f \
-            -name "MainActivity.kt" \
-            -print -quit)
+          echo "Project files:"
+          find . -maxdepth 3 -type f | sort | head -300
 
-          if [ -z "$MAIN_ACTIVITY" ]; then
-            echo "ERROR: MainActivity.kt not found."
-
-            find app/src/main \
-              -type f \
-              | sort \
-              | head -200
-
+          if [ ! -d "app" ]; then
+            echo "ERROR: app directory not found."
             exit 1
           fi
 
-          echo ""
-          echo "MainActivity found:"
-          echo "$MAIN_ACTIVITY"
+          if [ ! -f "app/build.gradle" ] && \
+             [ ! -f "app/build.gradle.kts" ]; then
+            echo "ERROR: app Gradle file not found."
+            exit 1
+          fi
 
-          echo ""
-          echo "Checking profile references..."
+          echo "Android project verified."
 
-          grep -n "profile" "$MAIN_ACTIVITY" || true
+      # 10. Verify MainActivity
+      - name: Verify MainActivity
+        shell: bash
+        run: |
+          set -e
 
+          echo "Searching MainActivity..."
 
-      # ==================================================
-      # 10. CLEAN
-      # ==================================================
+          find "$PROJECT_DIR/app/src" \
+            -type f \
+            \( -name "MainActivity.kt" -o -name "MainActivity.java" \) \
+            -print
+
+          MAIN_COUNT=$(find "$PROJECT_DIR/app/src" \
+            -type f \
+            \( -name "MainActivity.kt" -o -name "MainActivity.java" \) \
+            | wc -l)
+
+          if [ "$MAIN_COUNT" -eq 0 ]; then
+            echo "ERROR: MainActivity not found."
+            exit 1
+          fi
+
+          echo "MainActivity found."
+
+      # 11. Clean project
       - name: Clean project
         shell: bash
         run: |
@@ -277,14 +260,9 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          ./gradlew clean \
-            --no-daemon \
-            --stacktrace
+          ./gradlew clean --no-daemon
 
-
-      # ==================================================
-      # 11. BUILD DEBUG APK
-      # ==================================================
+      # 12. Build Debug APK
       - name: Build Debug APK
         shell: bash
         run: |
@@ -292,44 +270,46 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          echo "======================================"
-          echo "BUILDING TEST MITRA APK"
-          echo "======================================"
-
           ./gradlew assembleDebug \
             --no-daemon \
             --stacktrace \
-            --info
+            --warning-mode all
 
-          echo ""
-          echo "APK build completed."
-
-
-      # ==================================================
-      # 12. FIND APK
-      # ==================================================
+      # 13. Find APK
       - name: Find APK
         shell: bash
         run: |
           set -e
 
-          cd "$PROJECT_DIR"
+          echo "Searching for APK..."
 
-          echo "Searching APK files..."
-
-          find app/build/outputs/apk \
+          find "$PROJECT_DIR/app/build/outputs/apk" \
             -type f \
             -name "*.apk" \
             -print
 
+          APK=$(find "$PROJECT_DIR/app/build/outputs/apk" \
+            -type f \
+            -name "*.apk" \
+            | head -1)
 
-      # ==================================================
-      # 13. UPLOAD APK
-      # ==================================================
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK not found."
+            exit 1
+          fi
+
+          echo "APK found:"
+          echo "$APK"
+
+          mkdir -p "$GITHUB_WORKSPACE/apk-output"
+
+          cp "$APK" \
+            "$GITHUB_WORKSPACE/apk-output/TEST-MITRA-debug.apk"
+
+      # 14. Upload APK
       - name: Upload TEST MITRA APK
         uses: actions/upload-artifact@v4
         with:
           name: TEST-MITRA-APK
-          path: |
-            ${{ env.PROJECT_DIR }}/app/build/outputs/apk/**/*.apk
+          path: apk-output/TEST-MITRA-debug.apk
           if-no-files-found: error
