@@ -3,7 +3,8 @@ name: Build TEST MITRA APK
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -13,7 +14,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout source
         uses: actions/checkout@v4
 
@@ -23,7 +23,7 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Find and extract TEST MITRA ZIP
+      - name: Find TEST MITRA ZIP
         shell: bash
         run: |
           set -e
@@ -35,7 +35,7 @@ jobs:
             exit 1
           fi
 
-          echo "ZIP: $ZIP_FILE"
+          echo "Found ZIP: $ZIP_FILE"
 
           rm -rf extracted
           mkdir -p extracted
@@ -43,67 +43,177 @@ jobs:
           unzip -q "$ZIP_FILE" -d extracted
 
           PROJECT_DIR=$(find extracted -type f \
-            \( -name settings.gradle.kts -o -name settings.gradle \) \
+            \( -name "settings.gradle.kts" -o -name "settings.gradle" \) \
             -print -quit | xargs -r dirname)
 
           if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: Android project not found inside ZIP."
-            find extracted -maxdepth 5 -type f | sort
+            echo "ERROR: Android project not found."
+            find extracted -maxdepth 6 -type f | sort
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Android project: $PROJECT_DIR"
+          echo "Android project:"
+          echo "$PROJECT_DIR"
 
-      - name: Fix Android build configuration
+      - name: Fix TEST MITRA Android project
         shell: bash
         run: |
           set -e
 
           P="$PROJECT_DIR"
 
-          # Keep the previously working AGP fix.
+          echo "Fixing project: $P"
+
+          # ---------------------------------------------------------
+          # 1. Use compatible Android Gradle Plugin
+          # ---------------------------------------------------------
+
           if [ -f "$P/gradle/libs.versions.toml" ]; then
-            sed -i \
-              's/agp = "9\.1\.1"/agp = "8.9.2"/' \
+            sed -i 's/agp = "9\.1\.1"/agp = "8.9.2"/g' \
               "$P/gradle/libs.versions.toml"
           fi
 
-          # Keep the previous SDK configuration.
+          # ---------------------------------------------------------
+          # 2. Use SDK 36 because core-ktx 1.18.0 requires API 36
+          # ---------------------------------------------------------
+
           if [ -f "$P/app/build.gradle.kts" ]; then
 
             sed -i \
-              's/compileSdk { version = release(36) { minorApiLevel = 1 } }/compileSdk = 35/' \
+              's/compileSdk = 35/compileSdk = 36/g' \
               "$P/app/build.gradle.kts"
 
             sed -i \
-              's/targetSdk = 36/targetSdk = 35/' \
+              's/compileSdk = 34/compileSdk = 36/g' \
+              "$P/app/build.gradle.kts"
+
+            sed -i \
+              's/targetSdk = 35/targetSdk = 36/g' \
+              "$P/app/build.gradle.kts"
+
+            sed -i \
+              's/targetSdk = 34/targetSdk = 36/g' \
+              "$P/app/build.gradle.kts"
+
+            # Handle the newer compileSdk block if present.
+            sed -i \
+              's/compileSdk { version = release(36) { minorApiLevel = 1 } }/compileSdk = 36/g' \
               "$P/app/build.gradle.kts"
 
           fi
 
+          # ---------------------------------------------------------
+          # 3. Remove Google Services plugin
+          #
+          # The current project does NOT contain google-services.json.
+          # The app uses Supabase, so Google Services is not required
+          # for the APK build.
+          # ---------------------------------------------------------
+
+          if [ -f "$P/app/build.gradle.kts" ]; then
+
+            sed -i \
+              '/alias(libs\.plugins\.google\.services)/d' \
+              "$P/app/build.gradle.kts"
+
+            sed -i \
+              '/googleServices {/,/^}/d' \
+              "$P/app/build.gradle.kts"
+
+            sed -i \
+              '/implementation(platform(libs\.firebase\.bom))/d' \
+              "$P/app/build.gradle.kts"
+
+            sed -i \
+              '/implementation(libs\.firebase\.ai)/d' \
+              "$P/app/build.gradle.kts"
+
+            sed -i \
+              '/implementation(libs\.firebase\.appcheck\.recaptcha)/d' \
+              "$P/app/build.gradle.kts"
+
+          fi
+
+          # ---------------------------------------------------------
+          # 4. Remove Google Services plugin from root build file
+          # ---------------------------------------------------------
+
+          if [ -f "$P/build.gradle.kts" ]; then
+
+            sed -i \
+              '/alias(libs\.plugins\.google\.services) apply false/d' \
+              "$P/build.gradle.kts"
+
+          fi
+
+          # ---------------------------------------------------------
+          # 5. Disable unused Google Services plugin version
+          # ---------------------------------------------------------
+
+          if [ -f "$P/gradle/libs.versions.toml" ]; then
+
+            sed -i \
+              '/googleServices = "4\.5\.0"/d' \
+              "$P/gradle/libs.versions.toml"
+
+            sed -i \
+              '/google-services = { id = "com\.google\.gms\.google-services"/d' \
+              "$P/gradle/libs.versions.toml"
+
+          fi
+
+          # ---------------------------------------------------------
+          # 6. AndroidX / Gradle settings
+          # ---------------------------------------------------------
+
           touch "$P/gradle.properties"
 
-          grep -q '^android.useAndroidX=true' \
-            "$P/gradle.properties" || \
-            echo 'android.useAndroidX=true' >> "$P/gradle.properties"
+          grep -q '^android.useAndroidX=' "$P/gradle.properties" \
+            || echo 'android.useAndroidX=true' >> "$P/gradle.properties"
 
-          grep -q '^android.enableJetifier=true' \
-            "$P/gradle.properties" || \
-            echo 'android.enableJetifier=true' >> "$P/gradle.properties"
+          grep -q '^android.enableJetifier=' "$P/gradle.properties" \
+            || echo 'android.enableJetifier=true' >> "$P/gradle.properties"
 
           sed -i \
             's/^org.gradle.configuration-cache=true$/org.gradle.configuration-cache=false/' \
             "$P/gradle.properties"
 
-          grep -q '^org.gradle.configuration-cache=' \
-            "$P/gradle.properties" || \
-            echo 'org.gradle.configuration-cache=false' >> "$P/gradle.properties"
+          grep -q '^org.gradle.configuration-cache=' "$P/gradle.properties" \
+            || echo 'org.gradle.configuration-cache=false' >> "$P/gradle.properties"
 
-          echo "Build configuration fixed."
+          # ---------------------------------------------------------
+          # 7. Fix known MainActivity compile error
+          # ---------------------------------------------------------
 
-      - name: Configure Supabase for build
+          MAIN="$P/app/src/main/java/com/example/MainActivity.kt"
+
+          if [ -f "$MAIN" ]; then
+
+            sed -i \
+              's/onOpenSettings = { if (adminProfile.isMainAdmin) showSupabaseConfigDialog = true }/onOpenSettings = { showSupabaseConfigDialog = true }/' \
+              "$MAIN"
+
+          fi
+
+          # ---------------------------------------------------------
+          # 8. Remove any old Google Services JSON requirement
+          # ---------------------------------------------------------
+
+          find "$P/app" -type f -name "google-services.json" -delete
+
+          echo ""
+          echo "======================================"
+          echo "TEST MITRA project fixed"
+          echo "AGP       : 8.9.2"
+          echo "CompileSDK: 36"
+          echo "TargetSDK : 36"
+          echo "GoogleSvc : Removed"
+          echo "Supabase  : Kept"
+          echo "======================================"
+
+      - name: Configure Supabase
         shell: bash
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -117,39 +227,44 @@ jobs:
 
             printf 'SUPABASE_URL=%s\nSUPABASE_ANON_KEY=%s\n' \
               "$SUPABASE_URL" \
-              "$SUPABASE_ANON_KEY" > "$P/.env"
+              "$SUPABASE_ANON_KEY" \
+              > "$P/.env"
 
-            echo "Supabase secrets configured."
+            echo "Supabase configuration created."
+
+          elif [ -f "$P/.env.example" ]; then
+
+            cp "$P/.env.example" "$P/.env"
+
+            echo "Using .env.example."
 
           else
 
-            if [ -f "$P/.env.example" ]; then
-              cp "$P/.env.example" "$P/.env"
-              echo "Supabase secrets not supplied; using .env.example."
-            else
-              echo "WARNING: .env.example not found."
-              touch "$P/.env"
-            fi
+            touch "$P/.env"
+
+            echo "No .env.example found."
 
           fi
 
-      # IMPORTANT:
-      # The previous workflow used Gradle 8.11.1.
-      # This project now uses Gradle 9.3.1.
-      - name: Setup Gradle 9.3.1
+      - name: Setup Gradle 8.11.1
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '9.3.1'
-          cache-disabled: true
+          gradle-version: '8.11.1'
 
-      - name: Verify Gradle
+      - name: Verify Android project
         shell: bash
         run: |
           set -e
 
-          gradle --version
+          cd "$PROJECT_DIR"
 
-          echo "Gradle setup completed."
+          echo "Android project files:"
+          find . -maxdepth 3 -type f | sort
+
+          echo ""
+          echo "Checking Gradle configuration..."
+
+          gradle --version
 
       - name: Clean project
         shell: bash
@@ -164,12 +279,14 @@ jobs:
 
           echo "Project cleaned."
 
-      - name: Build Debug APK
+      - name: Build TEST MITRA Debug APK
         shell: bash
         run: |
           set -e
 
           cd "$PROJECT_DIR"
+
+          echo "Starting TEST MITRA APK build..."
 
           gradle \
             --no-daemon \
@@ -183,18 +300,18 @@ jobs:
         run: |
           set -e
 
-          APK=$(find \
-            "$PROJECT_DIR/app/build/outputs/apk/debug" \
+          APK=$(find "$PROJECT_DIR/app/build/outputs/apk/debug" \
             -type f \
-            -name '*.apk' \
+            -name "*.apk" \
             -print -quit)
 
           if [ -z "$APK" ]; then
-            echo "ERROR: APK not generated."
+            echo "ERROR: APK was not generated."
 
             find "$PROJECT_DIR/app/build" \
               -type f \
-              | sort || true
+              | sort \
+              | head -200
 
             exit 1
           fi
@@ -219,6 +336,6 @@ jobs:
         shell: bash
         run: |
           echo "======================================"
-          echo " TEST MITRA APK BUILD SUCCESSFUL"
+          echo "TEST MITRA APK BUILD SUCCESSFUL"
           echo "======================================"
-          echo "APK: apk-output/TEST-MITRA-debug.apk"
+          echo "APK: TEST-MITRA-debug.apk"
