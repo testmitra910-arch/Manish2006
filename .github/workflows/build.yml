@@ -14,16 +14,32 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
+      - name: Locate TEST MITRA project
+        shell: bash
+        run: |
+          set -e
+
+          if [ -f "testmitra/settings.gradle.kts" ]; then
+            echo "PROJECT_DIR=testmitra" >> "$GITHUB_ENV"
+          elif [ -f "settings.gradle.kts" ]; then
+            echo "PROJECT_DIR=." >> "$GITHUB_ENV"
+          else
+            echo "ERROR: Android project not found"
+            find . -maxdepth 3 -type f \
+              \( -name "settings.gradle.kts" -o -name "build.gradle.kts" \)
+            exit 1
+          fi
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
       - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '9.3.1'
+          gradle-version: "9.3.1"
 
       - name: Create .env from GitHub Secrets
         shell: bash
@@ -33,38 +49,39 @@ jobs:
         run: |
           set -e
 
-          test -n "$SUPABASE_URL" || {
-            echo "ERROR: GitHub Secret SUPABASE_URL is missing"
+          cd "$PROJECT_DIR"
+
+          if [ -z "$SUPABASE_URL" ]; then
+            echo "ERROR: SUPABASE_URL secret is missing"
             exit 1
-          }
+          fi
 
-          test -n "$SUPABASE_ANON_KEY" || {
-            echo "ERROR: GitHub Secret SUPABASE_ANON_KEY is missing"
+          if [ -z "$SUPABASE_ANON_KEY" ]; then
+            echo "ERROR: SUPABASE_ANON_KEY secret is missing"
             exit 1
-          }
+          fi
 
-          case "$SUPABASE_URL" in
-            https://*) ;;
-            *)
-              echo "ERROR: SUPABASE_URL must start with https://"
-              exit 1
-              ;;
-          esac
+          printf '%s\n' \
+            "SUPABASE_URL=$SUPABASE_URL" \
+            "SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY" \
+            > .env
 
-          printf 'SUPABASE_URL=%s\nSUPABASE_ANON_KEY=%s\n' \
-            "$SUPABASE_URL" "$SUPABASE_ANON_KEY" > .env
+          echo ".env created successfully"
 
       - name: Fix MainActivity settings reference
         shell: bash
         run: |
           set -e
 
+          cd "$PROJECT_DIR"
+
           FILE="app/src/main/java/com/example/MainActivity.kt"
 
-          test -f "$FILE" || {
-            echo "ERROR: $FILE not found"
+          if [ ! -f "$FILE" ]; then
+            echo "ERROR: MainActivity.kt not found"
+            find app/src -type f -name "MainActivity.kt" -print
             exit 1
-          }
+          fi
 
           python3 - <<'PY'
           from pathlib import Path
@@ -72,18 +89,14 @@ jobs:
           p = Path("app/src/main/java/com/example/MainActivity.kt")
           text = p.read_text(encoding="utf-8")
 
-          old1 = 'onOpenSettings = { if (adminProfile.isMainAdmin) showSupabaseConfigDialog = true },'
-          old2 = 'onOpenSettings = { if (profile.isMainAdmin) showSupabaseConfigDialog = true },'
-          new  = 'onOpenSettings = { if (profile.isMainAdmin) showSupabaseConfigDialog = true },'
+          text = text.replace(
+              "adminProfile.isMainAdmin",
+              "profile.isMainAdmin"
+          )
 
-          if old1 in text:
-              text = text.replace(old1, new, 1)
-              p.write_text(text, encoding="utf-8")
-              print("Fixed: adminProfile -> profile")
-          elif old2 in text:
-              print("Already correct: profile.isMainAdmin")
-          else:
-              print("No matching settings reference found; continuing.")
+          p.write_text(text, encoding="utf-8")
+
+          print("MainActivity.kt checked/fixed")
           PY
 
       - name: Verify Android project
@@ -91,39 +104,62 @@ jobs:
         run: |
           set -e
 
+          cd "$PROJECT_DIR"
+
+          echo "Project directory:"
+          pwd
+
+          echo "Project files:"
+          ls -la
+
           test -f settings.gradle.kts
+          test -f build.gradle.kts
           test -f app/build.gradle.kts
           test -f app/src/main/AndroidManifest.xml
           test -f app/src/main/java/com/example/MainActivity.kt
 
-          echo "Android project files OK"
+          echo "Android project verification successful"
 
       - name: Build Debug APK
         shell: bash
         run: |
           set -e
 
-          gradle --no-daemon --stacktrace clean assembleDebug
+          cd "$PROJECT_DIR"
+
+          echo "Building TEST MITRA..."
+
+          gradle \
+            --no-daemon \
+            --stacktrace \
+            clean \
+            assembleDebug
 
       - name: Find APK
         shell: bash
         run: |
           set -e
 
-          APK="$(find app/build/outputs/apk/debug \
-            -type f -name '*.apk' | head -n 1)"
+          cd "$PROJECT_DIR"
 
-          test -n "$APK" || {
+          APK=$(find app/build/outputs/apk/debug \
+            -type f \
+            -name "*.apk" \
+            | head -n 1)
+
+          if [ -z "$APK" ]; then
             echo "ERROR: APK not found"
+            find app/build -type f -name "*.apk" 2>/dev/null || true
             exit 1
-          }
+          fi
 
-          echo "APK created: $APK"
+          echo "APK FOUND:"
+          echo "$APK"
 
       - name: Upload TEST MITRA APK
         uses: actions/upload-artifact@v4
         with:
           name: TEST-MITRA-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: testmitra/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 30
