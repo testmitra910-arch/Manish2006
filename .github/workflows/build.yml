@@ -9,15 +9,24 @@ jobs:
 
     steps:
 
+      # --------------------------------------------------
+      # 1. CHECKOUT
+      # --------------------------------------------------
       - name: Checkout source
         uses: actions/checkout@v4
 
+      # --------------------------------------------------
+      # 2. JAVA 17
+      # --------------------------------------------------
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
+      # --------------------------------------------------
+      # 3. FIND ZIP
+      # --------------------------------------------------
       - name: Find TEST MITRA ZIP
         shell: bash
         run: |
@@ -26,15 +35,16 @@ jobs:
           ZIP_FILE=$(find . -maxdepth 2 -type f -iname "*.zip" | head -n 1)
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: TEST MITRA ZIP not found"
+            echo "ERROR: ZIP file not found"
             exit 1
           fi
 
+          echo "ZIP FOUND: $ZIP_FILE"
           echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
 
-          echo "Found ZIP:"
-          echo "$ZIP_FILE"
-
+      # --------------------------------------------------
+      # 4. EXTRACT ZIP
+      # --------------------------------------------------
       - name: Extract TEST MITRA ZIP
         shell: bash
         run: |
@@ -45,196 +55,256 @@ jobs:
 
           unzip -q "$ZIP_FILE" -d extracted
 
-          echo "ZIP extracted successfully."
+          echo "ZIP extracted successfully"
 
+      # --------------------------------------------------
+      # 5. FIND ANDROID PROJECT
+      # --------------------------------------------------
       - name: Locate Android project
         shell: bash
         run: |
           set -e
 
-          PROJECT=$(find extracted -type f \
-            \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
-            -print -quit)
+          PROJECT=$(find extracted -type f -name "settings.gradle.kts" -print -quit)
 
           if [ -z "$PROJECT" ]; then
-            echo "ERROR: Android project not found."
+            PROJECT=$(find extracted -type f -name "settings.gradle" -print -quit)
+          fi
+
+          if [ -z "$PROJECT" ]; then
+            echo "ERROR: Android project not found"
+            find extracted -maxdepth 5 -type f | head -100
             exit 1
           fi
 
           PROJECT_DIR=$(dirname "$PROJECT")
 
+          echo "ANDROID PROJECT: $PROJECT_DIR"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Android project:"
-          echo "$PROJECT_DIR"
-
+      # --------------------------------------------------
+      # 6. VERIFY PROJECT
+      # --------------------------------------------------
       - name: Verify Android project
         shell: bash
         run: |
           set -e
 
-          echo "Android project files:"
+          echo "Project:"
+          echo "$PROJECT_DIR"
+
+          echo "Files:"
           find "$PROJECT_DIR" -maxdepth 3 -type f | sort | head -200
 
-      - name: Configure Android SDK 36
-        shell: bash
-        run: |
-          set -e
-
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-
-          if [ ! -f "$SDKMANAGER" ]; then
-            SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" \
-              -type f -name sdkmanager | head -n 1)
-          fi
-
-          if [ -z "$SDKMANAGER" ] || [ ! -f "$SDKMANAGER" ]; then
-            echo "ERROR: sdkmanager not found."
+          if [ ! -f "$PROJECT_DIR/settings.gradle.kts" ] && \
+             [ ! -f "$PROJECT_DIR/settings.gradle" ]; then
+            echo "ERROR: settings.gradle not found"
             exit 1
           fi
 
-          echo "Using sdkmanager:"
-          echo "$SDKMANAGER"
+          if [ ! -d "$PROJECT_DIR/app" ]; then
+            echo "ERROR: app folder not found"
+            exit 1
+          fi
 
-          yes | "$SDKMANAGER" --licenses || true
-
-          "$SDKMANAGER" "platform-tools"
-
-          "$SDKMANAGER" "platforms;android-36"
-
-          "$SDKMANAGER" "build-tools;36.0.0"
-
-          yes | "$SDKMANAGER" --licenses || true
-
-          echo "Android SDK 36 configured successfully."
-
-      - name: Configure Gradle properties
+      # --------------------------------------------------
+      # 7. FIX GRADLE PROPERTIES
+      # --------------------------------------------------
+      - name: Fix Gradle properties
         shell: bash
         run: |
           set -e
 
-          cd "$PROJECT_DIR"
+          PROPS="$PROJECT_DIR/gradle.properties"
 
-          touch gradle.properties
+          touch "$PROPS"
 
-          if ! grep -q "android.suppressUnsupportedCompileSdk" gradle.properties; then
-            echo "android.suppressUnsupportedCompileSdk=36" >> gradle.properties
-          fi
+          grep -q "^android.useAndroidX=true" "$PROPS" || \
+            echo "android.useAndroidX=true" >> "$PROPS"
 
-          if ! grep -q "android.disallowKotlinSourceSets" gradle.properties; then
-            echo "android.disallowKotlinSourceSets=false" >> gradle.properties
-          fi
+          grep -q "^android.enableJetifier=true" "$PROPS" || \
+            echo "android.enableJetifier=true" >> "$PROPS"
 
-          if ! grep -q "android.defaults.buildfeatures.buildconfig" gradle.properties; then
-            echo "android.defaults.buildfeatures.buildconfig=true" >> gradle.properties
-          fi
+          grep -q "^android.disallowKotlinSourceSets=false" "$PROPS" || \
+            echo "android.disallowKotlinSourceSets=false" >> "$PROPS"
 
-          if ! grep -q "android.nonTransitiveRClass" gradle.properties; then
-            echo "android.nonTransitiveRClass=false" >> gradle.properties
-          fi
+          grep -q "^org.gradle.jvmargs=" "$PROPS" || \
+            echo "org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8" >> "$PROPS"
 
-          echo "Gradle properties configured."
+          echo "Gradle properties fixed"
 
-      - name: Fix Android compile SDK
+      # --------------------------------------------------
+      # 8. FIX ANDROID BUILD CONFIGURATION
+      # --------------------------------------------------
+      - name: Fix Android compile SDK and deprecated options
         shell: bash
         run: |
           set -e
 
-          cd "$PROJECT_DIR"
+          APP="$PROJECT_DIR/app/build.gradle.kts"
 
-          find . -type f \
-            \( -name "build.gradle" -o -name "build.gradle.kts" \) \
-            -print0 | while IFS= read -r -d '' FILE
-          do
-            echo "Checking:"
-            echo "$FILE"
+          if [ ! -f "$APP" ]; then
+            echo "ERROR: app/build.gradle.kts not found"
+            exit 1
+          fi
 
-            sed -i -E \
-              's/(compileSdk[[:space:]]*[=:][[:space:]]*)35/\136/g' \
-              "$FILE" || true
+          echo "Patching: $APP"
 
-            sed -i -E \
-              's/(compileSdk[[:space:]]+)[0-9]+/\136/g' \
-              "$FILE" || true
+          # Remove old buildConfig setting
+          sed -i '/^[[:space:]]*buildConfig[[:space:]]*=[[:space:]]*true/d' "$APP"
+          sed -i '/^[[:space:]]*buildConfig[[:space:]]*true/d' "$APP"
 
-          done
+          # Remove deprecated buildFeatures buildConfig blocks if empty
+          sed -i '/^[[:space:]]*buildConfig[[:space:]]*=/d' "$APP"
 
-          echo "Compile SDK check completed."
+          # Fix old compileSdk values
+          sed -i -E 's/compileSdk[[:space:]]*=[[:space:]]*[0-9]+/compileSdk = 36/g' "$APP"
+          sed -i -E 's/compileSdk[[:space:]]+[0-9]+/compileSdk 36/g' "$APP"
 
+          # Fix old target SDK
+          sed -i -E 's/targetSdk[[:space:]]*=[[:space:]]*[0-9]+/targetSdk = 36/g' "$APP"
+          sed -i -E 's/targetSdk[[:space:]]+[0-9]+/targetSdk 36/g' "$APP"
+
+          # Fix old min SDK only if present
+          sed -i -E 's/minSdk[[:space:]]*=[[:space:]]*[0-9]+/minSdk = 23/g' "$APP"
+          sed -i -E 's/minSdk[[:space:]]+[0-9]+/minSdk 23/g' "$APP"
+
+          echo "Android configuration patched"
+
+      # --------------------------------------------------
+      # 9. REMOVE BROKEN GOOGLE SERVICES CONFIGURATION
+      # --------------------------------------------------
       - name: Remove broken Google Services configuration
         shell: bash
         run: |
           set -e
 
-          cd "$PROJECT_DIR"
+          APP="$PROJECT_DIR/app/build.gradle.kts"
 
-          find . -type f \
-            \( -name "build.gradle" -o -name "build.gradle.kts" \) \
-            -print0 | while IFS= read -r -d '' FILE
-          do
+          if [ -f "$APP" ]; then
 
-            echo "Checking:"
-            echo "$FILE"
+            # Remove google services plugin
+            sed -i '/com.google.gms.google-services/d' "$APP"
+            sed -i '/com.google.firebase.appdistribution/d' "$APP"
 
-            sed -i \
-              '/com.google.gms.google-services/d' \
-              "$FILE" || true
+            # Remove old Google services apply plugin
+            sed -i '/apply(plugin.*google-services/d' "$APP"
 
-            sed -i \
-              '/com.google.firebase.appdistribution/d' \
-              "$FILE" || true
+          fi
 
-          done
+          # Remove Google services JSON because project uses Supabase
+          find "$PROJECT_DIR" \
+            -type f \
+            -name "google-services.json" \
+            -delete || true
 
-          rm -f app/google-services.json
-          rm -f app/src/main/google-services.json
-          rm -f app/src/debug/google-services.json
+          echo "Google Services configuration cleaned"
 
-          echo "Google Services configuration cleaned."
+      # --------------------------------------------------
+      # 10. REMOVE KOTLIN SOURCESETS DSL PROBLEM
+      # --------------------------------------------------
+      - name: Fix Kotlin source sets
+        shell: bash
+        run: |
+          set -e
 
-      - name: Fix Kotlin source set compatibility
+          APP="$PROJECT_DIR/app/build.gradle.kts"
+
+          if [ -f "$APP" ]; then
+
+            # Remove common old Kotlin sourceSets blocks
+            sed -i '/^[[:space:]]*kotlin[[:space:]]*{/d' "$APP"
+            sed -i '/^[[:space:]]*sourceSets[[:space:]]*{/d' "$APP"
+
+          fi
+
+          echo "Kotlin source-set compatibility fixed"
+
+      # --------------------------------------------------
+      # 11. INSTALL ANDROID SDK 36
+      # --------------------------------------------------
+      - name: Configure Android SDK 36
+        shell: bash
+        run: |
+          set -e
+
+          yes | sdkmanager --licenses >/dev/null || true
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0"
+
+          yes | sdkmanager --licenses >/dev/null || true
+
+          echo "Android SDK 36 installed"
+
+      # --------------------------------------------------
+      # 12. ACCEPT ALL SDK LICENSES
+      # --------------------------------------------------
+      - name: Accept Android SDK licenses
+        shell: bash
+        run: |
+          set -e
+
+          yes | sdkmanager --licenses >/dev/null || true
+
+          echo "SDK licenses accepted"
+
+      # --------------------------------------------------
+      # 13. GRADLE WRAPPER
+      # --------------------------------------------------
+      - name: Configure Gradle
         shell: bash
         run: |
           set -e
 
           cd "$PROJECT_DIR"
 
-          touch gradle.properties
+          # If wrapper exists, use it.
+          # Otherwise install Gradle 9.3.1.
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            ./gradlew --version
+          else
+            echo "Gradle wrapper not found"
+            echo "Installing Gradle 9.3.1"
 
-          if ! grep -q "android.disallowKotlinSourceSets=false" gradle.properties; then
-            echo "android.disallowKotlinSourceSets=false" >> gradle.properties
+            wget -q \
+              https://services.gradle.org/distributions/gradle-9.3.1-bin.zip \
+              -O /tmp/gradle.zip
+
+            unzip -q /tmp/gradle.zip -d /tmp/
+
+            export PATH="/tmp/gradle-9.3.1/bin:$PATH"
+
+            gradle --version
           fi
 
-          echo "Kotlin source set compatibility configured."
-
-      - name: Install Gradle 9.3.1
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '9.3.1'
-
+      # --------------------------------------------------
+      # 14. PREPARE GRADLE
+      # --------------------------------------------------
       - name: Prepare Gradle
         shell: bash
         run: |
           set -e
 
-          echo "Using installed Gradle:"
-          gradle --version
+          cd "$PROJECT_DIR"
 
-          echo "Checking Gradle version..."
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
 
-          GRADLE_VERSION=$(gradle --version | \
-            grep '^Gradle ' | \
-            awk '{print $2}')
-
-          echo "Detected Gradle version: $GRADLE_VERSION"
-
-          if [ "$GRADLE_VERSION" != "9.3.1" ]; then
-            echo "ERROR: Gradle 9.3.1 is required."
-            exit 1
+            echo "Gradle wrapper detected:"
+            ./gradlew --version
+          else
+            echo "Using installed Gradle"
+            export PATH="/tmp/gradle-9.3.1/bin:$PATH"
+            gradle --version
           fi
 
-          echo "Correct Gradle version confirmed."
-
+      # --------------------------------------------------
+      # 15. CLEAN PROJECT
+      # --------------------------------------------------
       - name: Clean project
         shell: bash
         run: |
@@ -244,10 +314,16 @@ jobs:
 
           echo "Cleaning project..."
 
-          gradle clean --no-daemon
+          if [ -f "./gradlew" ]; then
+            ./gradlew clean --no-daemon --stacktrace
+          else
+            export PATH="/tmp/gradle-9.3.1/bin:$PATH"
+            gradle clean --no-daemon --stacktrace
+          fi
 
-          echo "Project cleaned successfully."
-
+      # --------------------------------------------------
+      # 16. BUILD TEST MITRA DEBUG APK
+      # --------------------------------------------------
       - name: Build TEST MITRA Debug APK
         shell: bash
         run: |
@@ -255,58 +331,71 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          echo "========================================"
+          echo "=========================================="
           echo "STARTING TEST MITRA APK BUILD"
-          echo "========================================"
+          echo "=========================================="
 
-          gradle assembleDebug \
-            --no-daemon \
-            --stacktrace
+          if [ -f "./gradlew" ]; then
+            ./gradlew assembleDebug \
+              --no-daemon \
+              --stacktrace \
+              --info
+          else
+            export PATH="/tmp/gradle-9.3.1/bin:$PATH"
 
-          echo "========================================"
-          echo "APK BUILD COMPLETED"
-          echo "========================================"
+            gradle assembleDebug \
+              --no-daemon \
+              --stacktrace \
+              --info
+          fi
 
+          echo "=========================================="
+          echo "APK BUILD SUCCESSFUL"
+          echo "=========================================="
+
+      # --------------------------------------------------
+      # 17. FIND APK
+      # --------------------------------------------------
       - name: Find APK
         shell: bash
         run: |
           set -e
 
-          APK=$(find "$PROJECT_DIR" \
+          echo "Searching for APK..."
+
+          APK=$(find "$PROJECT_DIR/app/build/outputs/apk" \
             -type f \
             -name "*.apk" \
-            -path "*/build/outputs/apk/*" \
             | head -n 1)
 
           if [ -z "$APK" ]; then
-            echo "ERROR: APK not found."
-
-            echo "Searching all APK files:"
-            find "$PROJECT_DIR" -type f -name "*.apk" -print
-
+            echo "ERROR: APK not found"
+            find "$PROJECT_DIR/app/build/outputs" -type f || true
             exit 1
           fi
 
-          echo "========================================"
-          echo "APK FOUND"
-          echo "========================================"
+          echo "APK FOUND:"
           echo "$APK"
 
           echo "APK_PATH=$APK" >> "$GITHUB_ENV"
 
+      # --------------------------------------------------
+      # 18. UPLOAD APK
+      # --------------------------------------------------
       - name: Upload TEST MITRA APK
         uses: actions/upload-artifact@v4
         with:
-          name: TEST-MITRA-Debug-APK
+          name: TEST-MITRA-APK
           path: ${{ env.APK_PATH }}
           if-no-files-found: error
 
+      # --------------------------------------------------
+      # 19. BUILD SUCCESS
+      # --------------------------------------------------
       - name: Build successful
         shell: bash
         run: |
-          echo "========================================"
-          echo "       TEST MITRA APK READY"
-          echo "========================================"
-          echo ""
-          echo "APK build successful."
-          echo "Open the Artifacts section to download the APK."
+          echo "=========================================="
+          echo "TEST MITRA APK BUILD SUCCESSFUL"
+          echo "=========================================="
+          echo "APK is available in Artifacts."
